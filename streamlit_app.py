@@ -4,208 +4,139 @@ import numpy as np
 import plotly.express as px
 import joblib
 
-st.set_page_config(page_title="Employee Attrition Prediction Dashboard", layout="wide")
-st.title("Employee Attrition Prediction Dashboard")
-st.write("Upload a test CSV file to predict employee attrition, analyze risks, and get recommendations.")
+# Load model and preprocessor
+try:
+    model = joblib.load("xgboost_model.pkl")
+    preprocessor = joblib.load("preprocessor.pkl")
+except Exception as e:
+    st.error(f"Error loading model or preprocessor: {e}")
+    st.stop()
 
+# Manual Entry Form
+st.subheader("Manual Entry")
+with st.form(key="employee_form"):
+    col1, col2 = st.columns(2)
+    with col1:
+        employee_number = st.text_input("Employee Number", value="EMP001")
+        age = st.number_input("Age", min_value=18, max_value=100, value=30)
+        job_involvement = st.number_input("Job Involvement", min_value=1, max_value=4, value=3)
+        job_level = st.number_input("Job Level", min_value=1, max_value=5, value=2)
+        job_satisfaction = st.number_input("Job Satisfaction", min_value=1, max_value=4, value=4)
+        stock_option_level = st.number_input("Stock Option Level", min_value=0, max_value=3, value=0)
+        department = st.selectbox("Department", options=["Sales", "R&D", "HR"], index=0)
+    with col2:
+        years_at_company = st.number_input("Years at Company", min_value=0, max_value=40, value=5)
+        years_in_current_role = st.number_input("Years in Current Role", min_value=0, max_value=years_at_company, value=2)
+        years_with_curr_manager = st.number_input("Years with Current Manager", min_value=0, max_value=years_at_company, value=2)
+        distance_from_home = st.number_input("Distance from Home (km)", min_value=0, max_value=100, value=5)
+        monthly_income = st.number_input("Monthly Income", min_value=0, max_value=100000, value=5000)
+        overtime = st.selectbox("OverTime", options=["No", "Yes"], index=0)
+        marital_status = st.selectbox("Marital Status", options=["Single", "Married", "Divorced"], index=0)
+    submit_button = st.form_submit_button(label="Submit")
+
+# File Upload
+st.subheader("Upload CSV File")
 uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
 
-def load_model_and_preprocessor():
+# Tabs
+tabs = st.tabs(["Data Overview", "Predictions", "At-Risk Employees", "Dashboard"])
+
+# Prediction Logic
+if submit_button or uploaded_file:
+    if submit_button:
+        # Prepare data from manual entry
+        data = pd.DataFrame({
+            "EmployeeNumber": [employee_number],
+            "Age": [age],
+            "JobInvolvement": [job_involvement],
+            "JobLevel": [job_level],
+            "JobSatisfaction": [job_satisfaction],
+            "StockOptionLevel": [stock_option_level],
+            "YearsAtCompany": [years_at_company],
+            "YearsInCurrentRole": [years_in_current_role],
+            "YearsWithCurrManager": [years_with_curr_manager],
+            "DistanceFromHome": [distance_from_home],
+            "MonthlyIncome": [monthly_income],
+            "OverTime": [overtime],
+            "Department": [department],
+            "MaritalStatus": [marital_status]
+        })
+    elif uploaded_file:
+        # Load data from uploaded CSV
+        data = pd.read_csv(uploaded_file)
+        # Ensure required columns exist
+        required_columns = ["EmployeeNumber", "Age", "JobInvolvement", "JobLevel", "JobSatisfaction", 
+                           "StockOptionLevel", "YearsAtCompany", "YearsInCurrentRole", 
+                           "YearsWithCurrManager", "DistanceFromHome", "MonthlyIncome", "OverTime"]
+        missing_columns = [col for col in required_columns if col not in data.columns]
+        if missing_columns:
+            st.error(f"Missing columns in CSV: {missing_columns}")
+            st.stop()
+
+    # Create TenureCategory and SalaryBand
+    data["TenureCategory"] = pd.cut(data["YearsAtCompany"], bins=[-float("inf"), 2, 5, float("inf")], labels=["Short", "Medium", "Long"])
+    data["SalaryBand"] = pd.cut(data["MonthlyIncome"], bins=[-float("inf"), 3000, 6000, float("inf")], labels=["Low", "Medium", "High"])
+
+    # Define features expected by the preprocessor
+    model_features = ["Age", "JobInvolvement", "JobLevel", "JobSatisfaction", 
+                      "StockOptionLevel", "YearsAtCompany", "YearsInCurrentRole", 
+                      "YearsWithCurrManager", "DistanceFromHome", "MonthlyIncome", 
+                      "OverTime", "TenureCategory", "SalaryBand"]
+
+    # Transform the data
     try:
-        with open('xgboost_model.pkl', 'rb') as f:
-            model = joblib.load(f)
-        with open('preprocessor.pkl', 'rb') as f:
-            preprocessor = joblib.load(f)
-        return model, preprocessor
-    except:
-        return None, None
+        # Select only the features needed for the model
+        X = data[model_features]
+        transformed_data = preprocessor.transform(X)
+        probabilities = model.predict_proba(transformed_data)[:, 1]
+        predictions = ["Yes" if prob >= 0.5 else "No" for prob in probabilities]
 
-def get_possible_reason(employee_data, monthly_income_mean):
-    reasons = []
-    if employee_data['OverTime'].iloc[0] == 'Yes':
-        reasons.append("Working overtime")
-    if employee_data['MonthlyIncome'].iloc[0] < monthly_income_mean * 0.8:
-        reasons.append("Low monthly income")
-    if employee_data['YearsAtCompany'].iloc[0] < 3:
-        reasons.append("Short tenure at company")
-    if employee_data['DistanceFromHome'].iloc[0] > 10:
-        reasons.append("Long commute distance")
-    return reasons if reasons else ["No specific reason identified"]
+        # Add predictions to data
+        data["Attrition_Probability"] = probabilities
+        data["Attrition_Prediction"] = predictions
 
-def get_recommendations(reasons):
-    recommendations = []
-    for reason in reasons:
-        if reason == "Working overtime":
-            recommendations.append("Reduce overtime hours or offer flexible schedules")
-        elif reason == "Low monthly income":
-            recommendations.append("Consider salary adjustments or bonuses")
-        elif reason == "Short tenure at company":
-            recommendations.append("Implement better onboarding and retention programs")
-        elif reason == "Long commute distance":
-            recommendations.append("Offer remote work options or transportation benefits")
-    return recommendations if recommendations else ["No specific recommendations"]
+        # Data Overview
+        with tabs[0]:
+            st.write("### Data Overview")
+            st.write("Processed data shape:", transformed_data.shape)
+            st.dataframe(data)
 
-def preprocess_data(data):
-    """Apply the same feature engineering as in the notebook."""
-    # Create TenureCategory
-    data['TenureCategory'] = pd.cut(
-        data['YearsAtCompany'],
-        bins=[-float('inf'), 2, 5, float('inf')],
-        labels=['Short', 'Medium', 'Long']
-    )
+        # Predictions
+        with tabs[1]:
+            st.write("### Predictions")
+            st.dataframe(data[["EmployeeNumber", "Attrition_Probability", "Attrition_Prediction"]])
 
-    # Create SalaryBand
-    data['SalaryBand'] = pd.cut(
-        data['MonthlyIncome'],
-        bins=[-float('inf'), 3000, 6000, float('inf')],
-        labels=['Low', 'Medium', 'High']
-    )
-
-    return data
-
-if uploaded_file is not None:
-    data = pd.read_csv(uploaded_file)
-
-    # Apply feature engineering to create missing columns
-    data = preprocess_data(data)
-
-    # Handle missing values for categorical columns
-    categorical_cols = [
-        'BusinessTravel', 'Department', 'EducationField', 'Gender', 'JobRole',
-        'MaritalStatus', 'Over18', 'OverTime', 'TenureCategory', 'SalaryBand'
-    ]
-    for col in categorical_cols:
-        if col in data.columns:
-            mode = data[col].mode()
-            if not mode.empty:
-                data[col] = data[col].fillna(mode[0])
+        # At-Risk Employees
+        with tabs[2]:
+            st.write("### At-Risk Employees")
+            at_risk = data[data["Attrition_Probability"] > 0.6]
+            if not at_risk.empty:
+                st.dataframe(at_risk[["EmployeeNumber", "Attrition_Probability", "Attrition_Prediction"]])
             else:
-                data[col] = data[col].fillna('Unknown')
+                st.write("No at-risk employees found.")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "Data Overview", "Predictions", "At-Risk Employees", "Filters", "Dashboard"
-    ])
+        # Dashboard
+        with tabs[3]:
+            st.subheader("Interactive Visualizations & Insights")
 
-    with tab1:
-        st.subheader("Data Preview")
-        st.dataframe(data.head())
+            # Display total and at-risk employee counts
+            total_employees = len(data)
+            at_risk_employees = len(at_risk)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric(label="Total Employees", value=total_employees)
+            with col2:
+                st.metric(label="At-Risk Employees", value=at_risk_employees, 
+                         delta=f"{(at_risk_employees/total_employees)*100:.1f}% of total")
 
-    model, preprocessor = load_model_and_preprocessor()
-    if model is None or preprocessor is None:
-        st.error("No trained model or preprocessor found. Please ensure xgboost_model.pkl and preprocessor.pkl are in the project directory.")
-    else:
-        # Define the features expected by the model
-        final_selected_features = [
-            'Age', 'JobInvolvement', 'JobLevel', 'JobSatisfaction', 'StockOptionLevel',
-            'YearsAtCompany', 'YearsInCurrentRole', 'YearsWithCurrManager', 'DistanceFromHome',
-            'MonthlyIncome', 'TenureCategory', 'SalaryBand'
-        ]
+            # Check if Department and MaritalStatus are available
+            has_department = "Department" in data.columns
+            has_marital_status = "MaritalStatus" in data.columns
 
-        # Check for missing columns
-        missing_cols = [col for col in final_selected_features if col not in data.columns]
-        if missing_cols:
-            st.error(f"The following required columns are missing in the uploaded data: {missing_cols}")
-        else:
-            X = data[final_selected_features]
-            X_processed = preprocessor.transform(X)
-            predictions = model.predict(X_processed)
-            probabilities = model.predict_proba(X_processed)[:, 1]
-            data['Attrition_Prediction'] = ['Yes' if pred == 1 else 'No' for pred in predictions]
-            data['Attrition_Probability'] = probabilities
-
-            monthly_income_mean = data['MonthlyIncome'].mean() if 'MonthlyIncome' in data.columns else 0
-            at_risk = data[data['Attrition_Probability'] > 0.7].copy()
-
-            # ==== Tab 2: Predictions with Yes filter and recommendations ====
-            with tab2:
-                st.subheader("All Predictions")
-                yes_data = data[data['Attrition_Prediction'] == 'Yes']
-                st.write(f"Number of employees predicted to leave: {len(yes_data)}")
-                st.dataframe(yes_data[['EmployeeNumber', 'Attrition_Probability']])
-
-                if not yes_data.empty:
-                    selected_emp = st.selectbox(
-                        "Select Employee Number (Predicted Yes)", 
-                        yes_data['EmployeeNumber'],
-                        key="yes_emp"
-                    )
-                    emp_row = yes_data[yes_data['EmployeeNumber'] == selected_emp].iloc[0]
-                    st.write(f"*Attrition Probability:* {emp_row['Attrition_Probability']*100:.1f}%")
-
-                    # Calculate reasons and recommendations
-                    reasons = get_possible_reason(pd.DataFrame([emp_row]), monthly_income_mean)
-                    recommendations = get_recommendations(reasons)
-                    st.write("*Possible Reasons:*")
-                    for r in reasons:
-                        st.write(f"- {r}")
-                    st.write("*Recommendations:*")
-                    for rec in recommendations:
-                        st.write(f"- {rec}")
-                else:
-                    st.info("No employees predicted as 'Yes' for attrition.")
-
-                st.subheader("Download Results")
-                csv = data.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="Download Predictions as CSV",
-                    data=csv,
-                    file_name="attrition_predictions.csv",
-                    mime="text/csv"
-                )
-
-            # ==== Tab 3: At-Risk Employees ====
-            with tab3:
-                st.subheader("Employees at High Risk of Attrition")
-                if not at_risk.empty:
-                    at_risk['Possible_Reasons'] = at_risk.apply(
-                        lambda row: ", ".join(get_possible_reason(pd.DataFrame([row]), monthly_income_mean)), axis=1)
-                    at_risk['Recommendations'] = at_risk['Possible_Reasons'].apply(
-                        lambda x: ", ".join(get_recommendations(x.split(", "))))
-                    st.dataframe(at_risk[['EmployeeNumber', 'Attrition_Probability', 'Possible_Reasons', 'Recommendations']])
-                    high_risk_count = len(at_risk[at_risk['Attrition_Probability'] > 0.9])
-                    if high_risk_count > 0:
-                        st.error(f"Alert: {high_risk_count} employees have a very high attrition risk (>90%)!")
-                    elif len(at_risk) > 5:
-                        st.warning(f"Warning: {len(at_risk)} employees are at high risk of attrition.")
-                else:
-                    st.write("No employees identified as high risk.")
-
-            # ==== Tab 4: Filters ====
-            with tab4:
-                st.subheader("Filter At-Risk Employees")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    dept_options = ['All'] + sorted(data['Department'].dropna().unique())
-                    department = st.selectbox("Select Department", options=dept_options)
-                with col2:
-                    min_age = int(data['Age'].min()) if not data['Age'].isna().all() else 0
-                    max_age = int(data['Age'].max()) if not data['Age'].isna().all() else 0
-                    if min_age < max_age:
-                        age_range = st.slider("Select Age Range", min_value=min_age, max_value=max_age, value=(min_age, max_age))
-                    else:
-                        age_range = (min_age, max_age)
-                        st.info(f"All employees have the same age: {min_age}")
-                with col3:
-                    jr_options = ['All'] + sorted(data['JobRole'].dropna().unique())
-                    job_role = st.selectbox("Select Job Role", options=jr_options)
-
-                filtered_data = at_risk.copy()
-                if department != 'All':
-                    filtered_data = filtered_data[filtered_data['Department'] == department]
-                filtered_data = filtered_data[(filtered_data['Age'] >= age_range[0]) & (filtered_data['Age'] <= age_range[1])]
-                if job_role != 'All':
-                    filtered_data = filtered_data[filtered_data['JobRole'] == job_role]
-
-                if not filtered_data.empty:
-                    st.write("Filtered At-Risk Employees:")
-                    st.dataframe(filtered_data[['EmployeeNumber', 'Attrition_Probability', 'Possible_Reasons', 'Recommendations', 'Department', 'Age', 'JobRole']])
-                else:
-                    st.write("No employees match the selected filters.")
-
-            # ==== Tab 5: Dashboard with clear colors ====
-            with tab5:
-                st.subheader("Interactive Visualizations & Insights")
-
+            if not (has_department and has_marital_status):
+                st.warning("Dashboard visualizations require 'Department' and 'MaritalStatus' columns. "
+                          "Please ensure these columns are included in the CSV or use manual entry.")
+            else:
                 # Interactive filters for visualizations
                 col1, col2, col3 = st.columns(3)
                 with col1:
@@ -254,7 +185,7 @@ if uploaded_file is not None:
                     fig1.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
                     st.plotly_chart(fig1, use_container_width=True)
                 else:
-                    st.info("No data to display for this chart.")
+                    st.info("No data to display for Department chart.")
 
                 # 2. Attrition by Marital Status (Count)
                 if dashboard_filtered["MaritalStatus"].nunique() > 0:
@@ -268,6 +199,8 @@ if uploaded_file is not None:
                         category_orders={"Attrition_Prediction": attrition_order}
                     )
                     st.plotly_chart(fig2, use_container_width=True)
+                else:
+                    st.info("No data to display for Marital Status chart.")
 
                 # 3. Attrition by OverTime (Stacked Percentage)
                 if dashboard_filtered["OverTime"].nunique() > 0 and dashboard_filtered["Attrition_Prediction"].nunique() > 0:
@@ -285,6 +218,8 @@ if uploaded_file is not None:
                     )
                     fig3.update_traces(texttemplate='%{y:.1f}%', textposition='inside')
                     st.plotly_chart(fig3, use_container_width=True)
+                else:
+                    st.info("No data to display for OverTime chart.")
 
                 # 4. Distribution of Attrition Probability
                 if dashboard_filtered["Attrition_Prediction"].nunique() > 0:
@@ -298,6 +233,10 @@ if uploaded_file is not None:
                         category_orders={"Attrition_Prediction": attrition_order}
                     )
                     st.plotly_chart(fig4, use_container_width=True)
+                else:
+                    st.info("No data to display for Attrition Probability chart.")
 
+    except Exception as e:
+        st.error(f"Error during prediction: {e}")
 else:
-    st.info("Please upload your test data CSV file to start.")
+    st.info("Please submit manual entry or upload a CSV file to see results.")
